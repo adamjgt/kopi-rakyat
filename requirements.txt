@@ -1,0 +1,12 @@
+# Backend POS Integration Service — PRD Bagian 10
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+asyncpg>=0.29.0
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+httpx>=0.27.0
+
+# Testing (PRD Bagian 10 & Deliverable 6)
+pytest>=8.2.0
+pytest-asyncio>=0.23.0
+websockets>=12.0

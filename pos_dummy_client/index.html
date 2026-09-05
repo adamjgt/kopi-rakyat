@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kopi Rakyat — Dummy POS</title>
+<style>
+  :root{
+    --bg:#14100d; --panel:#1f1a16; --panel-2:#2a231e; --line:#3a302a;
+    --text:#f2ece6; --muted:#a2938a; --accent:#d99a4e; --accent-ink:#241a0e;
+    --ok:#5fbf7f; --warn:#e0b050; --err:#e0605a;
+    --s0:#7f8fa6; --s1:#d99a4e; --s2:#5fbf7f; --s3:#5f7f9f;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:14px/1.5 "Segoe UI",system-ui,-apple-system,sans-serif}
+  header{display:flex;gap:12px;align-items:center;flex-wrap:wrap;
+         padding:12px 18px;background:var(--panel);border-bottom:1px solid var(--line);
+         position:sticky;top:0;z-index:10}
+  h1{font-size:16px;margin:0 12px 0 0;letter-spacing:.02em}
+  h1 span{color:var(--accent)}
+  select,input,button{font:inherit;color:var(--text);background:var(--panel-2);
+        border:1px solid var(--line);border-radius:6px;padding:6px 10px}
+  button{cursor:pointer}
+  button:hover:not(:disabled){border-color:var(--accent)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  .grow{flex:1}
+  #status{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);
+          white-space:nowrap}
+  #dot{width:9px;height:9px;border-radius:50%;background:var(--err);
+       transition:background .2s}
+  #dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  #dot.wait{background:var(--warn)}
+
+  .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+       padding:10px 18px;border-bottom:1px solid var(--line);font-size:13px}
+  .chip{padding:4px 12px;border-radius:999px;border:1px solid var(--line);
+        background:var(--panel);cursor:pointer;color:var(--muted);font-size:12px}
+  .chip.sel{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);
+            font-weight:600}
+
+  main{padding:18px;display:grid;gap:14px;
+       grid-template-columns:repeat(auto-fill,minmax(330px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+        overflow:hidden;display:flex;flex-direction:column;
+        border-left:4px solid var(--s0)}
+  .card[data-stage="1"]{border-left-color:var(--s1)}
+  .card[data-stage="2"]{border-left-color:var(--s2)}
+  .card[data-stage="3"]{border-left-color:var(--s3);opacity:.62}
+  .card.flash{animation:flash 1.4s ease-out}
+  @keyframes flash{0%{background:#3d2f1c;transform:scale(1.015)}100%{background:var(--panel)}}
+
+  .ch{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;
+      padding:11px 14px;background:var(--panel-2);border-bottom:1px solid var(--line)}
+  .no{font-weight:700;font-size:14px;letter-spacing:.02em}
+  .meta{font-size:11px;color:var(--muted);margin-top:2px}
+  .pick{background:var(--accent);color:var(--accent-ink);font-weight:800;
+        padding:5px 11px;border-radius:6px;font-size:16px;letter-spacing:.06em;
+        white-space:nowrap}
+  .table{background:var(--panel);border:1px dashed var(--line);color:var(--accent);
+         padding:5px 11px;border-radius:6px;font-size:12px;white-space:nowrap}
+
+  ul{list-style:none;margin:0;padding:10px 14px;flex:1}
+  li{padding:7px 0;border-bottom:1px dashed var(--line)}
+  li:last-child{border-bottom:0}
+  .iname{display:flex;justify-content:space-between;gap:8px}
+  .qty{color:var(--accent);font-weight:700}
+  .opts{font-size:11px;color:var(--muted);margin-top:3px}
+  .note{font-size:11px;color:var(--warn);margin-top:3px;font-style:italic}
+
+  .cf{display:flex;justify-content:space-between;align-items:center;gap:10px;
+      padding:11px 14px;border-top:1px solid var(--line);background:var(--panel-2)}
+  .stage{font-size:11px;color:var(--muted)}
+  .stage b{color:var(--text);font-size:12px}
+  .adv{background:var(--accent);color:var(--accent-ink);font-weight:700;border-color:var(--accent)}
+  .adv:hover:not(:disabled){filter:brightness(1.12)}
+  .total{font-weight:700}
+  .empty{grid-column:1/-1;text-align:center;color:var(--muted);padding:60px 20px}
+  .empty code{background:var(--panel);padding:2px 6px;border-radius:4px;color:var(--accent)}
+  #log{position:fixed;right:14px;bottom:14px;width:330px;max-height:190px;overflow:auto;
+       background:#0e0b09;border:1px solid var(--line);border-radius:8px;padding:8px 10px;
+       font:11px/1.45 ui-monospace,Consolas,monospace;color:var(--muted)}
+  #log div{white-space:pre-wrap;word-break:break-word}
+  #log b{color:var(--accent)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>☕ Kopi <span>Rakyat</span> — Dummy POS</h1>
+  <label>Store
+    <select id="store"><option>memuat…</option></select>
+  </label>
+  <label style="font-size:12px;color:var(--muted)">API
+    <input id="api" size="24" placeholder="http://localhost:8000">
+  </label>
+  <button id="reload">Muat ulang</button>
+  <span class="grow"></span>
+  <span id="status"><span id="dot"></span><span id="statusText">terputus</span></span>
+</header>
+
+<div class="bar">
+  <span style="color:var(--muted)">Filter stage:</span>
+  <span class="chip sel" data-f="active">Aktif (0–2)</span>
+  <span class="chip" data-f="0">0 · diterima</span>
+  <span class="chip" data-f="1">1 · diracik</span>
+  <span class="chip" data-f="2">2 · siap</span>
+  <span class="chip" data-f="3">3 · selesai</span>
+  <span class="chip" data-f="all">Semua</span>
+  <span class="grow"></span>
+  <span id="count" style="color:var(--muted)"></span>
+</div>
+
+<main id="orders"></main>
+<div id="log"></div>
+
+<script>
+"use strict";
+const STAGE = ["diterima", "diracik", "siap", "selesai"];
+const MODE  = { pickup: "Pickup", dine_in: "Dine-in", delivery: "Delivery" };
+
+const $ = (id) => document.getElementById(id);
+const orders = new Map();          // order_id -> order object
+let ws = null, storeId = null, filter = "active", retry = 0;
+
+const apiBase = () => ($("api").value.trim() || window.location.origin).replace(/\/$/, "");
+
+function log(msg, kind = "") {
+  const el = document.createElement("div");
+  const t = new Date().toLocaleTimeString("id-ID");
+  el.innerHTML = `${t} ${kind ? `<b>${kind}</b> ` : ""}${msg}`;
+  $("log").prepend(el);
+  while ($("log").childElementCount > 60) $("log").lastChild.remove();
+}
+
+function money(v) {
+  return "Rp " + Number(v).toLocaleString("id-ID", { maximumFractionDigits: 0 });
+}
+
+function setStatus(state, text) {
+  $("dot").className = state;
+  $("statusText").textContent = text;
+}
+
+// --- rendering ------------------------------------------------------------
+function visible() {
+  const all = [...orders.values()].sort(
+    (a, b) => new Date(b.created_at) - new Date(a.created_at)
+  );
+  if (filter === "all") return all;
+  if (filter === "active") return all.filter((o) => o.stage < 3);
+  return all.filter((o) => o.stage === Number(filter));
+}
+
+function render() {
+  const list = visible();
+  const main = $("orders");
+  main.innerHTML = "";
+  $("count").textContent = `${list.length} order · ${orders.size} dimuat`;
+
+  if (!list.length) {
+    main.innerHTML =
+      `<div class="empty">Belum ada order.<br><br>Jalankan simulator:<br>
+       <code>python simulator/mobile_simulator.py --count 3</code></div>`;
+    return;
+  }
+  for (const o of list) main.appendChild(card(o));
+}
+
+function card(o, flash = false) {
+  const el = document.createElement("article");
+  el.className = "card" + (flash ? " flash" : "");
+  el.dataset.stage = o.stage;
+  el.dataset.id = o.id;
+
+  const badge =
+    o.fulfilment_mode === "pickup" && o.pickup_code
+      ? `<div class="pick">${o.pickup_code}</div>`
+      : o.fulfilment_mode === "dine_in" && o.table_number
+      ? `<div class="table">Meja ${o.table_number}</div>`
+      : `<div class="table">${MODE[o.fulfilment_mode] || o.fulfilment_mode}</div>`;
+
+  const items = (o.items || [])
+    .map((it) => {
+      const opts = ["size", "milk", "ice", "sugar"]
+        .map((k) => it[k]).filter(Boolean).join(" · ");
+      const extra = it.extra_shot ? " · +extra shot" : "";
+      return `<li>
+        <div class="iname"><span><span class="qty">${it.qty}×</span>
+          ${esc(it.name_snapshot)}</span><span>${money(it.line_total)}</span></div>
+        ${opts || extra ? `<div class="opts">${esc(opts)}${extra}</div>` : ""}
+        ${it.note ? `<div class="note">“${esc(it.note)}”</div>` : ""}
+      </li>`;
+    })
+    .join("");
+
+  const time = new Date(o.created_at).toLocaleTimeString("id-ID",
+    { hour: "2-digit", minute: "2-digit" });
+
+  el.innerHTML = `
+    <div class="ch">
+      <div>
+        <div class="no">${esc(o.order_no)}</div>
+        <div class="meta">${time} · ${MODE[o.fulfilment_mode] || o.fulfilment_mode}
+          · ${esc(o.customer_name || "Tamu")} · ${esc(o.payment_method || "-")}</div>
+      </div>${badge}
+    </div>
+    <ul>${items || '<li class="opts">(tidak ada item)</li>'}</ul>
+    <div class="cf">
+      <div>
+        <div class="stage">stage <b>${o.stage} · ${STAGE[o.stage]}</b>
+          &nbsp;status <b>${esc(o.status)}</b></div>
+        <div class="total">${money(o.total)}</div>
+      </div>
+      <button class="adv" ${o.stage >= 3 || o.status === "cancelled" ? "disabled" : ""}>
+        ${o.stage >= 3 ? "Selesai" : "→ " + STAGE[o.stage + 1]}
+      </button>
+    </div>`;
+
+  el.querySelector(".adv").addEventListener("click", (e) => advance(o.id, e.target));
+  return el;
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// --- aksi POS -------------------------------------------------------------
+async function advance(id, btn) {
+  btn.disabled = true;
+  try {
+    const r = await fetch(`${apiBase()}/api/orders/${id}/advance`, { method: "PATCH" });
+    const body = await r.json();
+    if (!r.ok) {
+      log(`gagal advance: ${esc(body.detail || r.status)}`, "ERR");
+      btn.disabled = false;
+      return;
+    }
+    // Perangkat POS lain di store ini ikut berubah lewat event
+    // order.stage_updated. Kita juga menerapkan hasil PATCH secara lokal agar
+    // tombol tidak macet bila socket sedang putus — event yang menyusul
+    // menuliskan nilai yang sama, jadi aman kalau keduanya tiba.
+    const local = orders.get(id);
+    if (local) { local.stage = body.stage; local.status = body.status;
+                 local.updated_at = body.updated_at; render(); }
+    log(`advance ${esc(body.order_no)} → stage ${body.stage}`, "PATCH");
+  } catch (err) {
+    log(`gagal advance: ${esc(err.message)}`, "ERR");
+    btn.disabled = false;
+  }
+}
+
+// --- data & realtime ------------------------------------------------------
+async function loadStores() {
+  try {
+    const r = await fetch(`${apiBase()}/api/stores`);
+    const list = await r.json();
+    const sel = $("store");
+    sel.innerHTML = "";
+    for (const s of list) {
+      const opt = new Option(`${s.name}${s.is_open ? "" : " (tutup)"}`, s.id);
+      sel.add(opt);
+    }
+    if (list.length) selectStore(sel.value);
+    else log("tidak ada store — jalankan db/seed.sql", "WARN");
+  } catch (err) {
+    log(`gagal memuat store: ${esc(err.message)} — cek API & CORS`, "ERR");
+    setStatus("", "backend tidak terjangkau");
+  }
+}
+
+async function loadQueue() {
+  const r = await fetch(`${apiBase()}/api/orders?store_id=${storeId}&limit=100`);
+  const list = await r.json();
+  orders.clear();
+  for (const o of list) orders.set(o.id, o);
+  render();
+  log(`snapshot awal: ${list.length} order`, "GET");
+}
+
+function selectStore(id) {
+  storeId = id;
+  orders.clear();
+  render();
+  loadQueue().catch((e) => log(`gagal memuat antrian: ${esc(e.message)}`, "ERR"));
+  openSocket();
+}
+
+function openSocket() {
+  if (ws) { ws.onclose = null; ws.close(); ws = null; }
+  const url = apiBase().replace(/^http/, "ws") + `/ws/pos/${storeId}`;
+  setStatus("wait", "menyambung…");
+  ws = new WebSocket(url);
+
+  ws.onopen = () => { retry = 0; };
+
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.event === "pos.connected") {
+      setStatus("on", `live · ${msg.data.store_name}`);
+      log(`terhubung ke ${esc(msg.data.store_name)} (${msg.data.clients} klien)`, "WS");
+    } else if (msg.event === "order.created") {
+      const o = { ...msg.data.order, items: msg.data.items };
+      orders.set(o.id, o);
+      render();
+      const el = document.querySelector(`.card[data-id="${o.id}"]`);
+      if (el) el.classList.add("flash");
+      log(`order baru ${esc(o.order_no)} (${(o.items || []).length} item)`, "NEW");
+    } else if (msg.event === "order.stage_updated") {
+      const o = orders.get(msg.data.order_id);
+      if (o) {
+        o.stage = msg.data.stage;
+        o.status = msg.data.status;
+        o.updated_at = msg.data.updated_at;
+        render();
+      } else {
+        loadQueue().catch(() => {});   // order dari sebelum kita connect
+      }
+      log(`stage ${esc(msg.data.order_id).slice(0, 8)}… → ${msg.data.stage}`, "UPD");
+    } else if (msg.event === "error") {
+      log(esc(msg.data.message), "ERR");
+    }
+  };
+
+  ws.onclose = () => {
+    setStatus("", "terputus");
+    retry = Math.min(retry + 1, 6);
+    const wait = 500 * 2 ** (retry - 1);
+    log(`socket tertutup, mencoba ulang dalam ${wait} ms`, "WS");
+    setTimeout(() => { if (storeId) openSocket(); }, wait);
+  };
+
+  ws.onerror = () => setStatus("", "error koneksi");
+}
+
+// --- bootstrap ------------------------------------------------------------
+$("store").addEventListener("change", (e) => selectStore(e.target.value));
+$("reload").addEventListener("click", () => { loadStores(); });
+$("api").addEventListener("change", () => loadStores());
+document.querySelectorAll(".chip").forEach((c) =>
+  c.addEventListener("click", () => {
+    document.querySelectorAll(".chip").forEach((x) => x.classList.remove("sel"));
+    c.classList.add("sel");
+    filter = c.dataset.f;
+    render();
+  })
+);
+// Keepalive agar proxy/idle timeout tidak memutus koneksi diam-diam.
+setInterval(() => { if (ws && ws.readyState === 1) ws.send("ping"); }, 25000);
+
+$("api").placeholder = window.location.origin;
+loadStores();
+</script>
+</body>
+</html>

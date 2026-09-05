@@ -1,0 +1,34 @@
+# PostgreSQL lokal untuk fase POC (PRD Bagian 10).
+#
+#   docker compose up -d
+#
+# Skema, RPC, dan data dummy di-apply otomatis saat container pertama kali
+# dibuat (urutan file penting: schema -> functions -> seed).
+# Untuk apply ulang dari nol: `docker compose down -v && docker compose up -d`.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kopi_rakyat_pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kopi
+      POSTGRES_PASSWORD: kopi
+      POSTGRES_DB: kopi_rakyat
+    ports:
+      # 5433 di host supaya tidak bentrok dengan Postgres lain yang mungkin
+      # sudah jalan di 5432.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./db/functions.sql:/docker-entrypoint-initdb.d/02_functions.sql:ro
+      - ./db/seed.sql:/docker-entrypoint-initdb.d/03_seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kopi -d kopi_rakyat"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
