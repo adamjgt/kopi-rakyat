@@ -2,9 +2,12 @@
 #
 #   docker compose up -d
 #
-# Skema, RPC, dan data dummy di-apply otomatis saat container pertama kali
-# dibuat (urutan file penting: schema -> functions -> seed).
-# Untuk apply ulang dari nol: `docker compose down -v && docker compose up -d`.
+# Mirror skema asli + RPC + data dummy di-apply otomatis saat container
+# pertama kali dibuat (urutan: auth_local -> schema -> functions -> realtime
+# -> seed). Untuk apply ulang dari nol: `docker compose down -v && docker compose up -d`.
+#
+# CATATAN: ini Postgres LOKAL untuk pengembangan. Untuk menyambung ke Supabase
+# asli, JANGAN pakai compose ini — cukup set DATABASE_URL di .env (lihat README).
 
 services:
   postgres:
@@ -21,9 +24,13 @@ services:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # Urutan penting. auth_local.sql men-stub skema `auth` Supabase (LOKAL
+      # SAJA); schema+functions+realtime adalah mirror skema asli; seed = dummy.
+      - ./db/auth_local.sql:/docker-entrypoint-initdb.d/00_auth_local.sql:ro
       - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
       - ./db/functions.sql:/docker-entrypoint-initdb.d/02_functions.sql:ro
-      - ./db/seed.sql:/docker-entrypoint-initdb.d/03_seed.sql:ro
+      - ./db/realtime.sql:/docker-entrypoint-initdb.d/03_realtime.sql:ro
+      - ./db/seed.sql:/docker-entrypoint-initdb.d/04_seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U kopi -d kopi_rakyat"]
       interval: 5s

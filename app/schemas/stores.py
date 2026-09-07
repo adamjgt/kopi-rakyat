@@ -1,8 +1,11 @@
-"""Schema tabel `stores` (read-only bagi backend ini)."""
+"""Schema tabel `stores` (read-only bagi backend ini).
+
+Mengikuti skema ASLI: `address` / `hours_note` / `map_x` / `map_y` NOT NULL,
+`distance_km` numeric(4,1), ada `sort_order`, TIDAK ada `created_at`.
+"""
 
 from __future__ import annotations
 
-from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -15,10 +18,10 @@ class Store(BaseModel):
     id: UUID
     key: str
     name: str
-    address: str | None = None
+    address: str
     distance_km: Decimal | None = None
     is_open: bool = True
-    hours_note: str | None = None
-    map_x: Decimal | None = None
-    map_y: Decimal | None = None
-    created_at: datetime | None = None
+    hours_note: str
+    map_x: Decimal
+    map_y: Decimal
+    sort_order: int = 0

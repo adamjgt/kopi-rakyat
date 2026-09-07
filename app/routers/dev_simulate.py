@@ -16,7 +16,7 @@ import logging
 from fastapi import APIRouter, HTTPException, status
 
 from app.rpc import RpcError, place_order
-from app.schemas.orders import Order, SimulateOrderRequest
+from app.schemas.orders import Order, PlaceOrderRequest
 
 logger = logging.getLogger(__name__)
 
@@ -34,15 +34,15 @@ router = APIRouter(prefix="/api/dev", tags=["dev (POC only)"])
         501: {"description": "RPC place_order() belum ada di database"},
     },
 )
-async def simulate_order(payload: SimulateOrderRequest) -> Order:
-    """Meneruskan payload apa adanya ke `place_order()`.
+async def simulate_order(payload: PlaceOrderRequest) -> Order:
+    """Meneruskan payload apa adanya ke `place_order()` (impersonasi user_id).
 
     Backend tidak menghitung harga, tidak membuat `order_no`, dan tidak
-    menyentuh loyalty — semuanya milik RPC (PRD Bagian 11).
+    menyentuh loyalty — semuanya milik RPC. Harga dihitung pemanggil.
     """
     logger.info(
-        "simulate-order: store=%s mode=%s items=%d",
-        payload.store_id, payload.fulfilment_mode.value, len(payload.items),
+        "simulate-order: store=%s mode=%s items=%d total=%s",
+        payload.store_id, payload.fulfilment_mode.value, len(payload.items), payload.total,
     )
     try:
         return await place_order(payload)

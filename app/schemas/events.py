@@ -33,7 +33,7 @@ class OrderCreatedEvent(BaseModel):
 
 class OrderStageUpdatedData(BaseModel):
     order_id: UUID
-    stage: int = Field(ge=0, le=3)
+    stage: int = Field(ge=0)
     status: OrderStatus
     updated_at: datetime
 

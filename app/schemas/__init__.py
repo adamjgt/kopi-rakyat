@@ -7,9 +7,9 @@ from app.schemas.orders import (
     OrderItem,
     OrderStatus,
     OrderWithItems,
-    PaymentMethod,
-    SimulateOrderItem,
-    SimulateOrderRequest,
+    PaymentStatus,
+    PlaceOrderItem,
+    PlaceOrderRequest,
 )
 from app.schemas.stores import Store
 
@@ -21,9 +21,9 @@ __all__ = [
     "OrderStageUpdatedEvent",
     "OrderStatus",
     "OrderWithItems",
-    "PaymentMethod",
-    "SimulateOrderItem",
-    "SimulateOrderRequest",
+    "PaymentStatus",
+    "PlaceOrderItem",
+    "PlaceOrderRequest",
     "Store",
     "WSEvent",
 ]

@@ -15,11 +15,13 @@ from app import db
 from app.schemas.orders import Order, OrderItem, OrderWithItems
 from app.schemas.stores import Store
 
+# Kolom persis milik tabel `orders` ASLI — tanpa `updated_at` (tidak ada di DB
+# asli), dengan `payment_provider` dan `paid_at`.
 _ORDER_COLUMNS = """
     o.id, o.order_no, o.user_id, o.store_id, o.address_id, o.fulfilment_mode,
-    o.table_number, o.scheduled_for, o.payment_method, o.payment_status,
-    o.subtotal, o.discount, o.delivery_fee, o.total, o.voucher_code,
-    o.status, o.stage, o.pickup_code, o.created_at, o.updated_at
+    o.table_number, o.scheduled_for, o.payment_method, o.payment_provider,
+    o.payment_status, o.subtotal, o.discount, o.delivery_fee, o.total,
+    o.voucher_code, o.status, o.stage, o.pickup_code, o.created_at, o.paid_at
 """
 
 

@@ -6,9 +6,10 @@ Dua mode (PRD Bagian 7.1 & 10), dipilih lewat `REALTIME_MODE`:
           trigger `notify_order_event()` di `db/schema.sql`. Mode default —
           latensi mendekati nol dan tanpa beban query berulang.
 
-  poll    Fallback: query `orders` yang `updated_at`-nya melewati watermark,
-          setiap `POLL_INTERVAL_SECONDS`. Dipakai bila trigger tidak boleh
-          dipasang pada database tim mobile.
+  poll    Fallback tanpa trigger: bandingkan snapshot `(stage, status)` order
+          aktif tiap `POLL_INTERVAL_SECONDS`. Dipakai bila trigger NOTIFY tidak
+          boleh dipasang pada database tim mobile. (Tabel `orders` asli tidak
+          punya `updated_at`, jadi tidak ada watermark waktu.)
 
 Kedua mode menghasilkan bentuk event yang identik, sehingga sisa aplikasi
 (dan klien POS) tidak perlu tahu mode mana yang aktif.
@@ -21,7 +22,7 @@ import contextlib
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 
 import asyncpg
@@ -148,41 +149,67 @@ class OrderEventListener:
 
     # -- sumber event: polling ----------------------------------------
     async def _run_poll(self) -> None:
+        """Fallback tanpa trigger — dipakai bila NOTIFY tak boleh dipasang.
+
+        Tabel `orders` ASLI TIDAK punya kolom `updated_at`, jadi kita tidak bisa
+        memakai watermark waktu. Sebagai gantinya kita simpan snapshot
+        `(stage, status)` per order aktif di memori, lalu tiap siklus mem-poll
+        order yang masih aktif (`stage < 3`) atau baru dibuat, dan membandingkan:
+
+          * id baru        -> order.created
+          * (stage,status) berubah -> order.stage_updated
+
+        Cakupan dibatasi ke order aktif + order 1 hari terakhir agar query ringan.
+        Siklus pertama hanya membangun baseline (tidak memancarkan event) supaya
+        order lama tidak diputar ulang saat backend baru start.
+        """
         interval = self._settings.poll_interval_seconds
-        watermark: datetime | None = None
+        seen: dict[UUID, tuple[int, str]] = {}
+        baseline_done = False
 
         while not self._stopping.is_set():
             try:
-                if watermark is None:
-                    # Mulai dari "sekarang" supaya order lama tidak diputar ulang.
-                    watermark = await db.fetchval("SELECT now()")
-                    logger.info("Polling aktif (interval=%.1fs, watermark=%s)",
-                                interval, watermark)
-
                 rows = await db.fetch(
                     """
-                    SELECT id, store_id, stage, status, created_at, updated_at
+                    SELECT id, store_id, stage, status
                     FROM orders
-                    WHERE updated_at > $1
-                    ORDER BY updated_at ASC
-                    LIMIT 200
-                    """,
-                    watermark,
+                    WHERE stage < 3 OR created_at > now() - interval '1 day'
+                    ORDER BY created_at ASC
+                    LIMIT 500
+                    """
                 )
-                for row in rows:
-                    # created_at == updated_at -> baris baru dari place_order().
-                    is_new = row["created_at"] == row["updated_at"]
-                    self._queue.put_nowait(
-                        OrderEvent(
-                            event=EVENT_ORDER_CREATED if is_new else EVENT_ORDER_STAGE_UPDATED,
-                            order_id=row["id"],
-                            store_id=row["store_id"],
-                            stage=row["stage"],
-                            status=row["status"],
-                            updated_at=row["updated_at"],
-                        )
+                now = datetime.now(timezone.utc)
+
+                if not baseline_done:
+                    for row in rows:
+                        seen[row["id"]] = (row["stage"], row["status"])
+                    baseline_done = True
+                    logger.info(
+                        "Polling aktif (interval=%.1fs, %d order dasar diabaikan)",
+                        interval, len(seen),
                     )
-                    watermark = row["updated_at"]
+                else:
+                    for row in rows:
+                        oid = row["id"]
+                        cur = (row["stage"], row["status"])
+                        prev = seen.get(oid)
+                        if prev is None:
+                            event = EVENT_ORDER_CREATED
+                        elif prev != cur:
+                            event = EVENT_ORDER_STAGE_UPDATED
+                        else:
+                            continue
+                        seen[oid] = cur
+                        self._queue.put_nowait(
+                            OrderEvent(
+                                event=event,
+                                order_id=oid,
+                                store_id=row["store_id"],
+                                stage=row["stage"],
+                                status=row["status"],
+                                updated_at=now,
+                            )
+                        )
             except asyncio.CancelledError:
                 raise
             except asyncio.QueueFull:
