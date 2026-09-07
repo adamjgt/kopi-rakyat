@@ -1,22 +1,29 @@
-"""Pemanggilan RPC `place_order()` & `advance_order_stage()` (Deliverable 6).
+"""RPC asli `place_order()` & `advance_order_stage()` lewat backend.
 
-Butuh PostgreSQL yang sudah di-apply schema + functions + seed.
-Otomatis di-skip bila database tidak terjangkau (lihat tests/conftest.py).
+Butuh PostgreSQL berisi MIRROR skema asli. Otomatis di-skip bila tidak
+terjangkau (lihat tests/conftest.py).
+
+Catatan kontrak ASLI yang diuji di sini:
+  * place_order() TIDAK menghitung harga — subtotal/total/unit_price/line_total
+    dikirim klien dan disimpan apa adanya.
+  * Order baru: status 'received', payment_status 'paid', stage 0,
+    order_no '#KR-####', +1 stamp & poin.
+  * advance_order_stage(): stage 0→1→2→3, status preparing → ready/on_the_way
+    → completed; di-scope ke pemilik order (backend impersonasi via JWT claims).
 """
 
 from __future__ import annotations
 
 import re
+from uuid import UUID
 
 import pytest
 
 from tests.conftest import (
     ADDRESS_BUDI,
-    PRODUCT_CROISSANT,
-    PRODUCT_KOPI_SUSU,
-    PRODUCT_NONAKTIF,
-    STORE_KEMANG,
-    STORE_TUTUP,
+    PRODUCT_TUMBLER,
+    USER_BUDI,
+    default_item,
     order_payload,
 )
 
@@ -26,39 +33,35 @@ pytestmark = pytest.mark.db
 # ---------------------------------------------------------------------------
 # place_order()
 # ---------------------------------------------------------------------------
-async def test_place_order_membuat_order_dengan_stage_0_dan_status_paid(client):
+async def test_place_order_stage_0_status_received_payment_paid(client):
     resp = await client.post("/api/dev/simulate-order", json=order_payload())
 
     assert resp.status_code == 201, resp.text
     order = resp.json()
     assert order["stage"] == 0
-    assert order["status"] == "paid"
+    assert order["status"] == "received"
     assert order["payment_status"] == "paid"
-    assert order["store_id"] == STORE_KEMANG
-    assert re.fullmatch(r"ORD-\d{8}-\d{4}", order["order_no"]), order["order_no"]
+    assert order["payment_provider"] == "simulated"
+    assert re.fullmatch(r"#KR-\d+", order["order_no"]), order["order_no"]
 
 
-async def test_place_order_menghitung_harga_dari_base_price_plus_option_delta(client):
-    """Kopi Susu 18.000 + size M (0) + oat (+5.000) = 23.000 ×2 = 46.000.
-
-    Backend tidak menghitung apa pun di sini — angka ini murni hasil RPC.
-    """
-    resp = await client.post("/api/dev/simulate-order", json=order_payload())
+async def test_place_order_menyimpan_harga_dari_klien(client):
+    """Server tidak menghitung — angka yang disimpan = yang dikirim."""
+    payload = order_payload()
+    resp = await client.post("/api/dev/simulate-order", json=payload)
     order = resp.json()
 
-    assert float(order["subtotal"]) == 46000
-    assert float(order["discount"]) == 0
-    assert float(order["delivery_fee"]) == 0
-    assert float(order["total"]) == 46000
+    assert order["subtotal"] == payload["subtotal"] == 48000
+    assert order["total"] == payload["total"] == 48000
+    assert isinstance(order["total"], int)
 
     detail = (await client.get(f"/api/orders/{order['id']}")).json()
     item = detail["items"][0]
-    assert float(item["unit_price"]) == 23000
-    assert float(item["line_total"]) == 46000
+    assert item["unit_price"] == 24000
+    assert item["line_total"] == 48000
 
 
 async def test_place_order_menyimpan_snapshot_opsi_item(client):
-    """PRD Acceptance: order_items yang tampil di POS = snapshot tersimpan."""
     resp = await client.post("/api/dev/simulate-order", json=order_payload())
     detail = (await client.get(f"/api/orders/{resp.json()['id']}")).json()
 
@@ -75,97 +78,57 @@ async def test_place_order_menyimpan_snapshot_opsi_item(client):
 
 async def test_place_order_pickup_menghasilkan_pickup_code(client):
     resp = await client.post("/api/dev/simulate-order", json=order_payload())
-    assert resp.json()["pickup_code"], "mode pickup wajib punya pickup_code"
+    assert resp.json()["pickup_code"], "place_order asli selalu men-generate pickup_code"
 
 
-async def test_place_order_dine_in_tanpa_pickup_code_tapi_ada_nomor_meja(client):
+async def test_place_order_dine_in_menyimpan_nomor_meja(client):
     payload = order_payload(fulfilment_mode="dine_in", table_number="7")
     order = (await client.post("/api/dev/simulate-order", json=payload)).json()
-
-    assert order["pickup_code"] is None
     assert order["table_number"] == "7"
 
 
-async def test_place_order_delivery_menambahkan_delivery_fee(client):
-    payload = order_payload(fulfilment_mode="delivery", address_id=ADDRESS_BUDI)
+async def test_place_order_delivery_total_termasuk_ongkir(client):
+    payload = order_payload(
+        fulfilment_mode="delivery", address_id=ADDRESS_BUDI, delivery_fee=10000
+    )
     order = (await client.post("/api/dev/simulate-order", json=payload)).json()
 
-    assert float(order["delivery_fee"]) > 0
-    assert float(order["total"]) == float(order["subtotal"]) + float(order["delivery_fee"])
-
-
-async def test_place_order_extra_shot_menaikkan_unit_price(client):
-    tanpa = order_payload()
-    tanpa["items"][0]["extra_shot"] = False
-    dengan = order_payload()
-    dengan["items"][0]["extra_shot"] = True
-
-    a = (await client.post("/api/dev/simulate-order", json=tanpa)).json()
-    b = (await client.post("/api/dev/simulate-order", json=dengan)).json()
-
-    assert float(b["subtotal"]) > float(a["subtotal"])
-
-
-async def test_place_order_voucher_fixed_mengurangi_total(client):
-    order = (await client.post(
-        "/api/dev/simulate-order", json=order_payload(voucher_code="HEMAT5K")
-    )).json()
-
-    assert float(order["discount"]) == 5000
-    assert float(order["total"]) == float(order["subtotal"]) - 5000
+    assert order["delivery_fee"] == 10000
+    assert order["total"] == order["subtotal"] - order["discount"] + 10000
 
 
 async def test_place_order_multi_item(client):
-    payload = order_payload()
-    payload["items"].append({"product_id": PRODUCT_CROISSANT, "qty": 1})
+    tumbler = default_item(
+        product_id=PRODUCT_TUMBLER, name_snapshot="Tumbler Kopi Rakyat",
+        size=None, milk=None, ice=None, sugar=None, note=None,
+        unit_price=85000, qty=1, line_total=85000,
+    )
+    payload = order_payload(items=[default_item(), tumbler])
 
     order = (await client.post("/api/dev/simulate-order", json=payload)).json()
     detail = (await client.get(f"/api/orders/{order['id']}")).json()
 
     assert len(detail["items"]) == 2
-    assert float(order["subtotal"]) == 46000 + 20000
+    assert order["subtotal"] == 48000 + 85000
 
 
-# --- error path: constraint milik RPC, bukan milik backend -----------------
-async def test_place_order_ditolak_bila_produk_nonaktif(client):
-    payload = order_payload()
-    payload["items"][0]["product_id"] = PRODUCT_NONAKTIF
+async def test_place_order_menambah_stamp_dan_poin(client):
+    """Efek samping loyalty: +1 stamp, +total/1000 poin, 1 baris ledger."""
+    from app import db
 
-    resp = await client.post("/api/dev/simulate-order", json=payload)
+    payload = order_payload()  # total 48000 -> 48 poin
+    order = (await client.post("/api/dev/simulate-order", json=payload)).json()
 
-    assert resp.status_code == 409
-    assert "not active" in resp.json()["detail"]
-
-
-async def test_place_order_ditolak_bila_toko_tutup(client):
-    resp = await client.post("/api/dev/simulate-order", json=order_payload(STORE_TUTUP))
-
-    assert resp.status_code == 409
-    assert "closed" in resp.json()["detail"]
-
-
-async def test_place_order_404_bila_store_tidak_ada(client):
-    payload = order_payload("00000000-0000-0000-0000-0000000000ff")
-    resp = await client.post("/api/dev/simulate-order", json=payload)
-    assert resp.status_code == 404
-
-
-async def test_place_order_404_bila_produk_tidak_ada(client):
-    payload = order_payload()
-    payload["items"][0]["product_id"] = "00000000-0000-0000-0000-0000000000ff"
-    resp = await client.post("/api/dev/simulate-order", json=payload)
-    assert resp.status_code == 404
-
-
-async def test_place_order_ditolak_bila_delivery_tanpa_alamat(client):
-    resp = await client.post(
-        "/api/dev/simulate-order", json=order_payload(fulfilment_mode="delivery")
+    row = await db.fetchrow(
+        "SELECT delta_stamps, delta_points FROM loyalty_ledger WHERE order_id = $1",
+        UUID(order["id"]),
     )
-    assert resp.status_code == 409
+    assert row is not None
+    assert row["delta_stamps"] == 1
+    assert row["delta_points"] == 48
 
 
 async def test_place_order_422_bila_items_kosong(client):
-    """Ditolak Pydantic sebelum menyentuh database."""
     resp = await client.post("/api/dev/simulate-order", json=order_payload(items=[]))
     assert resp.status_code == 422
 
@@ -173,49 +136,52 @@ async def test_place_order_422_bila_items_kosong(client):
 # ---------------------------------------------------------------------------
 # advance_order_stage()
 # ---------------------------------------------------------------------------
-async def _new_order(client) -> dict:
-    resp = await client.post("/api/dev/simulate-order", json=order_payload())
+async def _new_order(client, **overrides) -> dict:
+    resp = await client.post("/api/dev/simulate-order", json=order_payload(**overrides))
     assert resp.status_code == 201, resp.text
     return resp.json()
 
 
 async def test_advance_menaikkan_stage_satu_per_satu(client):
     order = await _new_order(client)
-
     for expected in (1, 2, 3):
         resp = await client.patch(f"/api/orders/{order['id']}/advance")
         assert resp.status_code == 200, resp.text
         assert resp.json()["stage"] == expected
 
 
-async def test_advance_mengubah_status_sesuai_stage(client):
-    """ASUMSI PRD 7.2: stage 1–2 -> 'active', stage 3 -> 'completed'."""
-    order = await _new_order(client)
-
+async def test_advance_status_pickup(client):
+    order = await _new_order(client)  # pickup
     s1 = (await client.patch(f"/api/orders/{order['id']}/advance")).json()
     s2 = (await client.patch(f"/api/orders/{order['id']}/advance")).json()
     s3 = (await client.patch(f"/api/orders/{order['id']}/advance")).json()
 
-    assert s1["status"] == "active"
-    assert s2["status"] == "active"
+    assert s1["status"] == "preparing"
+    assert s2["status"] == "ready"
     assert s3["status"] == "completed"
 
 
-async def test_advance_menyentuh_updated_at(client):
-    order = await _new_order(client)
-    after = (await client.patch(f"/api/orders/{order['id']}/advance")).json()
-    assert after["updated_at"] >= order["updated_at"]
+async def test_advance_status_delivery_on_the_way(client):
+    order = await _new_order(
+        client, fulfilment_mode="delivery", address_id=ADDRESS_BUDI, delivery_fee=10000
+    )
+    await client.patch(f"/api/orders/{order['id']}/advance")           # stage 1
+    s2 = (await client.patch(f"/api/orders/{order['id']}/advance")).json()  # stage 2
+
+    assert s2["stage"] == 2
+    assert s2["status"] == "on_the_way"
 
 
-async def test_advance_di_stage_final_ditolak_409(client):
+async def test_advance_di_stage_final_idempotent(client):
+    """advance_order_stage asli meng-clamp di 3 (least(3, stage+1)), tidak error."""
     order = await _new_order(client)
     for _ in range(3):
         await client.patch(f"/api/orders/{order['id']}/advance")
 
     resp = await client.patch(f"/api/orders/{order['id']}/advance")
-
-    assert resp.status_code == 409
-    assert "final stage" in resp.json()["detail"]
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["stage"] == 3
+    assert resp.json()["status"] == "completed"
 
 
 async def test_advance_order_tidak_dikenal_404(client):
@@ -224,13 +190,12 @@ async def test_advance_order_tidak_dikenal_404(client):
 
 
 async def test_advance_tersimpan_permanen_di_database(client):
-    """PRD Acceptance: data konsisten karena RPC menulis ke Postgres."""
     order = await _new_order(client)
     await client.patch(f"/api/orders/{order['id']}/advance")
 
     from app import repository
-    from uuid import UUID
 
     persisted = await repository.get_order(UUID(order["id"]))
     assert persisted is not None
     assert persisted.stage == 1
+    assert persisted.status.value == "preparing"

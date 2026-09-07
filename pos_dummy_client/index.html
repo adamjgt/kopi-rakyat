@@ -117,7 +117,7 @@
 <script>
 "use strict";
 const STAGE = ["diterima", "diracik", "siap", "selesai"];
-const MODE  = { pickup: "Pickup", dine_in: "Dine-in", delivery: "Delivery" };
+const MODE  = { pickup: "Pickup", dine_in: "Dine-in", delivery: "Delivery", pre_order: "Pre-order" };
 
 const $ = (id) => document.getElementById(id);
 const orders = new Map();          // order_id -> order object
@@ -160,8 +160,8 @@ function render() {
 
   if (!list.length) {
     main.innerHTML =
-      `<div class="empty">Belum ada order.<br><br>Jalankan simulator:<br>
-       <code>python simulator/mobile_simulator.py --count 3</code></div>`;
+      `<div class="empty">Belum ada order.<br><br>Order muncul otomatis saat
+       pelanggan checkout di aplikasi mobile (place_order() ke Supabase).</div>`;
     return;
   }
   for (const o of list) main.appendChild(card(o));

@@ -87,6 +87,24 @@ async def fetchval(query: str, *args: Any) -> Any:
         return await conn.fetchval(query, *args)
 
 
+async def set_auth_claims(conn: asyncpg.Connection, user_id: Any) -> None:
+    """Impersonasi pemilik order untuk transaksi ini.
+
+    RPC asli (`place_order`, `advance_order_stage`) di-scope ke `auth.uid()`.
+    Backend tersambung sebagai role database (bukan lewat PostgREST + JWT), jadi
+    `auth.uid()` default NULL. Di sini kita set GUC `request.jwt.claims`
+    (transaction-local, `is_local = true`) sehingga `auth.uid()` mengembalikan
+    `user_id` — persis mekanisme yang dibaca Supabase. RPC-nya tidak diubah.
+
+    HARUS dipanggil di dalam `conn.transaction()` agar `is_local` berlaku dan
+    klaim tidak bocor ke koneksi lain di pool.
+    """
+    await conn.execute(
+        "SELECT set_config('request.jwt.claims', $1, true)",
+        json.dumps({"sub": str(user_id), "role": "authenticated"}),
+    )
+
+
 async def healthcheck() -> bool:
     """True bila database membalas `SELECT 1`."""
     try:

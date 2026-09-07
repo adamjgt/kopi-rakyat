@@ -79,14 +79,14 @@ async def test_filter_stage(client):
 async def test_filter_status(client):
     order = await _create(client)
 
-    paid = (await client.get(
-        "/api/orders", params={"store_id": STORE_KEMANG, "status": "paid"})).json()
+    received = (await client.get(
+        "/api/orders", params={"store_id": STORE_KEMANG, "status": "received"})).json()
     completed = (await client.get(
         "/api/orders", params={"store_id": STORE_KEMANG, "status": "completed"})).json()
 
-    assert order["id"] in {o["id"] for o in paid}
+    assert order["id"] in {o["id"] for o in received}
     assert order["id"] not in {o["id"] for o in completed}
-    assert all(o["status"] == "paid" for o in paid)
+    assert all(o["status"] == "received" for o in received)
 
 
 async def test_filter_fulfilment_mode(client):
@@ -112,7 +112,7 @@ async def test_filter_gabungan(client):
         params={
             "store_id": STORE_KEMANG,
             "stage": 0,
-            "status": "paid",
+            "status": "received",
             "fulfilment_mode": "delivery",
         },
     )).json()

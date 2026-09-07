@@ -1,7 +1,7 @@
 # Kopi Rakyat — Backend POS Integration Service
 
-Lapisan integrasi realtime antara **database online-ordering** (skema milik tim
-mobile) dan **aplikasi POS barista**, sesuai PRD v2.0 — fase Proof of Concept.
+Lapisan integrasi realtime antara **database online-ordering** (Supabase milik
+tim mobile) dan **aplikasi POS barista**.
 
 Backend ini **tidak mendesain ulang skema data** dan **tidak menduplikasi
 business logic**. Perannya:
@@ -14,51 +14,106 @@ business logic**. Perannya:
 | Menyediakan REST read-only untuk antrian & detail order | Melayani aplikasi mobile (mobile langsung ke Supabase) |
 
 ```
-[Mobile App / Dummy Simulator]
-        |  place_order()  (RPC)
-        v
-[PostgreSQL / Supabase]  ──trigger──> NOTIFY 'pos_order_events'
-        ^                                     |
-        |  advance_order_stage() (RPC)        v
-[Backend POS Integration (FastAPI)] ──WS scoped per store_id──> [Dummy POS Client]
+[Mobile App]  ──place_order() (RPC, JWT user)──►  [Supabase / PostgreSQL]
+                                                    │        ▲
+                              trigger NOTIFY ───────┘        │ advance_order_stage()
+                              'pos_order_events'             │ (RPC, backend impersonasi
+                                     │                       │  pemilik order)
+                                     ▼                       │
+        [Backend POS Integration (FastAPI)] ──WS per store_id──► [Dummy POS Client]
 ```
+
+> **Status integrasi:** sudah disambungkan ke skema Supabase asli. Skema, RPC,
+> dan schema Pydantic backend telah dicocokkan dengan skema asli tim mobile —
+> lihat [docs/schema-comparison.md](docs/schema-comparison.md) untuk setiap
+> perbedaan yang ditemukan & disesuaikan. Simulator mobile lama **tidak dipakai
+> lagi** (dipindah ke `legacy/`) dan endpoint `/api/dev/*` **mati secara default**.
 
 ---
 
-## 1. Quick Start
+## 1. Menyambung ke Supabase asli
 
-### 1.1 Jalankan PostgreSQL lokal
+Inilah jalur produksi. Tidak ada perubahan kode — cukup `.env` + satu file SQL.
+
+### 1.1 Isi `DATABASE_URL`
+
+Supabase Dashboard → **Project Settings → Database → Connection string (URI)**,
+mode **Session**. Gunakan role **`postgres`** (bukan `anon`/`authenticated`)
+supaya backend bisa membaca order lintas user dan menyetel klaim JWT saat
+memanggil RPC.
+
+```env
+DATABASE_URL=postgresql://postgres:<PASSWORD>@db.<ref>.supabase.co:5432/postgres
+REALTIME_MODE=notify
+ENABLE_DEV_ENDPOINTS=false
+CORS_ORIGINS=https://pos.domain-anda.com
+```
+
+### 1.2 Pasang trigger realtime (sekali)
+
+Backend mendengar order baru & perubahan stage lewat `LISTEN/NOTIFY`. Pasang
+trigger di Supabase **satu kali**: buka **SQL Editor**, tempel isi
+[`db/realtime.sql`](db/realtime.sql), Run.
+
+`db/realtime.sql` hanya menambah **satu fungsi + dua trigger** pada tabel
+`orders` — tidak mengubah kolom, data, atau RPC. Itulah **satu-satunya** objek
+dari `db/` yang boleh di-apply ke Supabase asli.
+
+> Tak boleh pasang trigger? Set `REALTIME_MODE=poll` — backend mem-polling
+> perubahan stage tanpa menambah objek apa pun ke database (lihat §5).
+
+### 1.3 Jalankan
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate          # Windows  (source .venv/bin/activate di *nix)
+pip install -r requirements.txt
+copy .env.example .env          # cp di *nix, lalu isi DATABASE_URL
+uvicorn app.main:app --reload
+```
+
+Selesai. Saat pelanggan checkout di aplikasi mobile, ordernya muncul di POS
+tanpa refresh. **JANGAN** apply `db/schema.sql`, `db/functions.sql`,
+`db/auth_local.sql`, atau `db/seed.sql` ke Supabase — objek itu sudah ada di
+sana; file-file itu hanya mirror untuk dev lokal.
+
+### Kenapa perlu impersonasi user?
+
+`place_order()` dan `advance_order_stage()` asli di-scope ke `auth.uid()` (id
+user dari JWT). Backend tersambung sebagai role database, jadi `auth.uid()`
+default NULL. Sebelum memanggil RPC, backend menyetel GUC `request.jwt.claims`
+(transaction-local) ke pemilik order — persis sumber yang dibaca `auth.uid()`.
+RPC milik tim mobile dipakai **apa adanya**, tanpa modifikasi. Detail:
+[docs/schema-comparison.md §9](docs/schema-comparison.md).
+
+---
+
+## 2. Menjalankan secara lokal (tanpa Supabase)
+
+Untuk pengembangan/demo, tersedia Postgres lokal yang berisi **mirror** skema
+asli (+ data dummy). Butuh Docker:
 
 ```bash
 docker compose up -d
 ```
 
-Skema, RPC, dan data dummy di-apply otomatis saat container pertama kali dibuat
-(urutan: `schema.sql` → `functions.sql` → `seed.sql`). Postgres listen di
-**host port 5433** agar tidak bentrok dengan instalasi lain.
+`db/*.sql` di-apply otomatis saat container pertama dibuat (urutan:
+`auth_local` → `schema` → `functions` → `realtime` → `seed`). Postgres listen di
+**host port 5433**.
 
 <details>
 <summary>Tidak punya Docker? Pakai PostgreSQL yang sudah ada.</summary>
 
-Buat database kosong, set `DATABASE_URL` di `.env`, lalu:
-
 ```bash
-python scripts/init_db.py            # schema + functions + seed
+python scripts/init_db.py            # apply mirror + seed
 python scripts/init_db.py --no-seed  # tanpa data dummy
-python scripts/init_db.py --drop     # ⚠ hapus objek POC lalu apply ulang
+python scripts/init_db.py --drop     # ⚠ hapus objek mirror lalu apply ulang
 ```
+`.env` `DATABASE_URL` diarahkan ke database lokal itu. Untuk demo lokal, set
+`ENABLE_DEV_ENDPOINTS=true` agar bisa menyuntik order via `/api/dev/*`.
 </details>
 
-### 1.2 Siapkan environment Python
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate          # Windows   (source .venv/bin/activate di *nix)
-pip install -r requirements.txt
-copy .env.example .env          # cp di *nix
-```
-
-### 1.3 Jalankan backend
+Lalu:
 
 ```bash
 uvicorn app.main:app --reload
@@ -70,77 +125,54 @@ uvicorn app.main:app --reload
 | <http://localhost:8000/docs> | Swagger UI |
 | <http://localhost:8000/api/health> | Health check |
 
-### 1.4 Buka dummy POS, lalu kirim order dummy
+---
 
-Buka <http://localhost:8000/pos/>, pilih store **Kopi Rakyat Kemang**, lalu di
-terminal lain:
+## 3. Struktur `db/`
 
-```bash
-python simulator/mobile_simulator.py --count 3 --store kemang
-```
+| File | Apply ke Supabase asli? | Isi |
+|---|---|---|
+| `db/schema.sql` | ❌ **Tidak** | Mirror tabel + RLS + sequence dari skema asli. |
+| `db/functions.sql` | ❌ **Tidak** | Salinan RPC asli (`place_order`, `advance_order_stage`, `redeem_reward`). |
+| `db/auth_local.sql` | ❌ **Tidak** | Stub skema `auth` Supabase (untuk dev lokal). |
+| `db/seed.sql` | ❌ **Tidak** | Data dummy lokal. |
+| **`db/realtime.sql`** | ✅ **Ya** (bila `notify`) | Trigger NOTIFY `pos_order_events`. |
 
-Order muncul di POS **tanpa refresh manual**. Klik tombol `→ diracik` untuk
-memajukan stage; semua tab POS yang terbuka pada store yang sama ikut berubah.
+Sumber kebenaran skema = `supabase/migrations/…` di repo mobile app. `db/schema.sql`
+& `db/functions.sql` adalah salinan setianya (dibuat idempotent) supaya dev/test
+lokal berjalan di atas kontrak yang sama persis dengan Supabase asli.
 
 ---
 
-## 2. Struktur Proyek
-
-```
-kopi rakyat/
-├─ app/
-│  ├─ main.py                 # entry point FastAPI, lifespan, CORS, health
-│  ├─ config.py               # semua setting via env var / .env
-│  ├─ db.py                   # asyncpg pool
-│  ├─ repository.py           # query BACA (dipakai router + listener)
-│  ├─ rpc/
-│  │  ├─ place_order.py       # wrapper SELECT * FROM place_order(...)
-│  │  ├─ advance_stage.py     # wrapper SELECT * FROM advance_order_stage(...)
-│  │  └─ errors.py            # SQLSTATE -> HTTP status
-│  ├─ routers/
-│  │  ├─ stores.py  orders.py  ws.py
-│  │  └─ dev_simulate.py      # ⚠ POC only
-│  ├─ realtime/
-│  │  ├─ listener.py          # LISTEN/NOTIFY + fallback polling
-│  │  └─ ws_manager.py        # connection manager per store_id
-│  └─ schemas/                # Pydantic request/response/event
-├─ db/
-│  ├─ schema.sql              # DDL seluruh tabel Bagian 8 + trigger realtime
-│  ├─ functions.sql           # place_order, advance_order_stage, redeem_reward
-│  └─ seed.sql                # store/produk/user dummy (UUID hardcoded)
-├─ simulator/mobile_simulator.py
-├─ pos_dummy_client/index.html
-├─ scripts/init_db.py
-├─ tests/
-├─ docker-compose.yml  requirements.txt  .env.example  pytest.ini
-```
-
-`repository.py` adalah satu-satunya tambahan di luar struktur PRD Bagian 12.
-Alasannya: router REST dan listener realtime harus menghasilkan bentuk data
-yang **persis sama**, jadi query bacanya dipusatkan di satu tempat.
-
----
-
-## 3. Konfigurasi
-
-Semua lewat environment variable (lihat `.env.example`):
+## 4. Konfigurasi (env var)
 
 | Variable | Default | Keterangan |
 |---|---|---|
-| `DATABASE_URL` | `postgresql://kopi:kopi@localhost:5433/kopi_rakyat` | **Satu-satunya yang perlu diganti saat pindah ke Supabase asli.** |
-| `REALTIME_MODE` | `notify` | `notify` = LISTEN/NOTIFY, `poll` = fallback polling |
+| `DATABASE_URL` | *(local docker)* | **Ganti ini saat pindah ke Supabase.** Pakai role `postgres`, mode Session. |
+| `REALTIME_MODE` | `notify` | `notify` = LISTEN/NOTIFY (butuh `db/realtime.sql`), `poll` = polling snapshot |
 | `REALTIME_CHANNEL` | `pos_order_events` | Channel NOTIFY |
 | `POLL_INTERVAL_SECONDS` | `1.0` | Interval polling (mode `poll`) |
-| `ENABLE_DEV_ENDPOINTS` | `true` | `false` → `/api/dev/*` tidak didaftarkan sama sekali |
-| `CORS_ORIGINS` | `*` | Dipisah koma untuk membatasi origin |
+| `ENABLE_DEV_ENDPOINTS` | `false` | `true` → daftarkan `/api/dev/*` (hanya untuk uji lokal) |
+| `CORS_ORIGINS` | `*` | Dipisah koma untuk membatasi origin POS |
 | `DB_POOL_MIN_SIZE` / `DB_POOL_MAX_SIZE` | `1` / `10` | Ukuran pool asyncpg |
 | `LOG_LEVEL` | `INFO` | |
 
 ---
 
-## 4. API
+## 5. Realtime — dua mode
 
-### 4.1 REST
+| Mode | Cara kerja | Objek DB dibutuhkan |
+|---|---|---|
+| `notify` *(default)* | Trigger `notify_order_event()` mem-`pg_notify` id+metadata setiap INSERT/perubahan `stage`\|`status`; backend `LISTEN` lalu fetch data lengkap. Latensi mendekati nol. | `db/realtime.sql` |
+| `poll` | Bandingkan snapshot `(stage, status)` order aktif tiap `POLL_INTERVAL_SECONDS`. Tabel `orders` asli tak punya `updated_at`, jadi tak ada watermark waktu. | **tidak ada** |
+
+Kedua mode menghasilkan event identik ke POS, jadi klien tak perlu tahu mode
+mana yang aktif.
+
+---
+
+## 6. API
+
+### 6.1 REST
 
 | Method | Endpoint | Keterangan |
 |---|---|---|
@@ -149,237 +181,74 @@ Semua lewat environment variable (lihat `.env.example`):
 | `GET` | `/api/orders?store_id=&status=&stage=&fulfilment_mode=&limit=&offset=` | Antrian order + `order_items` |
 | `GET` | `/api/orders/{order_id}` | Detail satu order |
 | `PATCH` | `/api/orders/{order_id}/advance` | Majukan stage (→ `advance_order_stage()`) |
-| `POST` | `/api/dev/simulate-order` | **POC only** — teruskan ke `place_order()` |
 | `GET` | `/api/health` | Health check |
 
 `store_id` pada `GET /api/orders` **wajib** — itulah yang menegakkan Store
-Isolation di sisi REST. Tanpa parameter tersebut request ditolak `422`, bukan
-mengembalikan order semua cabang.
+Isolation. Tanpa parameter tersebut request ditolak `422`.
 
-Kode status error: `404` order/store/produk tidak ada · `409` ditolak aturan
-bisnis RPC (toko tutup, produk nonaktif, stage sudah final) · `422` payload
-tidak valid · `501` RPC belum ada di database.
+Kode status error: `404` order/store tidak ada · `409` ditolak aturan bisnis RPC
+atau order tanpa pemilik · `422` payload tidak valid · `501` RPC belum ada.
 
-> **Catatan format:** kolom uang (`subtotal`, `total`, `unit_price`, …) bertipe
-> `numeric` dan diserialisasi Pydantic sebagai **string JSON** (mis. `"46000.00"`)
-> supaya presisi tidak hilang. Klien perlu `Number(...)` / `float(...)`.
+> **Format uang:** kolom `subtotal`, `total`, `unit_price`, dst. bertipe
+> **`integer`** (rupiah bulat) di skema asli, dan diserialisasi sebagai **angka
+> JSON biasa** (mis. `48000`) — bukan lagi string desimal.
 
-### 4.2 WebSocket — `/ws/pos/{store_id}`
+### 6.2 WebSocket — `/ws/pos/{store_id}`
 
 | Event | Kapan | Payload |
 |---|---|---|
-| `pos.connected` | tepat setelah connect | `{store_id, store_key, store_name, is_open, clients}` |
-| `order.created` | order baru dari `place_order()` | `{order: {...}, items: [...]}` |
+| `pos.connected` | setelah connect | `{store_id, store_key, store_name, is_open, clients}` |
+| `order.created` | order baru | `{order: {...}, items: [...]}` |
 | `order.stage_updated` | stage/status berubah | `{order_id, stage, status, updated_at}` |
-| `pong` | balasan `"ping"` dari klien | `{}` |
-| `error` | `store_id` tidak valid/tidak ada, lalu socket ditutup | `{message}` |
+| `pong` | balasan `"ping"` | `{}` |
+| `error` | `store_id` invalid | `{message}` |
 
-`order.created` sudah membawa `order_items` lengkap — POS tidak perlu request
-kedua. Kirim `"ping"` sesekali sebagai keepalive (dummy client: tiap 25 detik).
-
-`order.stage_updated` **selalu** dikirim oleh listener, bukan oleh endpoint
-`PATCH`. Konsekuensinya: perubahan stage yang dilakukan langsung lewat SQL
-(saat debugging) juga tetap sampai ke POS, dan tidak ada event ganda.
+`order.created` sudah membawa `order_items` lengkap. `order.stage_updated`
+selalu dikirim oleh listener (bukan endpoint `PATCH`), jadi perubahan stage dari
+sumber mana pun tetap sampai ke POS tanpa event ganda.
 
 ---
 
-## 5. Memanggil RPC Langsung dari SQL (debugging manual)
+## 7. Memanggil RPC langsung (debugging)
 
-Ketiga RPC bisa dipanggil tanpa lewat backend. Masuk ke psql:
-
-```bash
-docker compose exec postgres psql -U kopi -d kopi_rakyat
-```
-
-### `place_order()` — buat order + items, set paid, tambah stamp & poin
+Karena `place_order()`/`advance_order_stage()` di-scope `auth.uid()`, set klaim
+dulu dalam transaksi yang sama:
 
 ```sql
-SELECT * FROM place_order(
-    p_user_id         := '11111111-1111-1111-1111-111111111111',
-    p_store_id        := 'aaaaaaaa-0000-0000-0000-000000000001',
-    p_fulfilment_mode := 'pickup',
-    p_payment_method  := 'qris',
-    p_items           := '[{"product_id":"cccccccc-0000-0000-0000-000000000001",
-                            "qty":2,"size":"M","milk":"oat","ice":"less_ice",
-                            "sugar":"50%","extra_shot":false,
-                            "note":"less sugar please"}]'::jsonb,
-    p_voucher_code    := NULL,
-    p_table_number    := NULL,
-    p_scheduled_for   := NULL,
-    p_address_id      := NULL
-);
-```
+BEGIN;
+SELECT set_config('request.jwt.claims',
+                  '{"sub":"11111111-1111-1111-1111-111111111111"}', true);
 
-Signature lengkap:
-`place_order(p_user_id uuid, p_store_id uuid, p_fulfilment_mode fulfilment_mode,
-p_payment_method payment_method, p_items jsonb, p_voucher_code text DEFAULT NULL,
-p_table_number text DEFAULT NULL, p_scheduled_for timestamptz DEFAULT NULL,
-p_address_id uuid DEFAULT NULL) RETURNS orders`
-
-### `advance_order_stage()` — naikkan stage 0→1→2→3
-
-```sql
+-- advance stage order milik user di atas:
 SELECT * FROM advance_order_stage('<order-uuid>');
-
--- order terbaru yang belum selesai, untuk dicoba:
-SELECT id, order_no, stage, status FROM orders
-WHERE stage < 3 ORDER BY created_at DESC LIMIT 5;
+COMMIT;
 ```
 
-Menolak dengan exception bila order sudah `stage = 3` atau `status = 'cancelled'`.
-
-### `redeem_reward()` — di luar scope backend POS (dipanggil mobile app)
+Signature RPC asli:
 
 ```sql
-SELECT * FROM redeem_reward(
-    '11111111-1111-1111-1111-111111111111',
-    'ffffffff-1111-0000-0000-000000000001'
-);
+place_order(p_store_id uuid, p_fulfilment_mode text, p_table_number text,
+  p_address_id uuid, p_scheduled_for timestamptz, p_payment_method text,
+  p_payment_provider text, p_subtotal int, p_discount int, p_delivery_fee int,
+  p_total int, p_voucher_code text, p_items jsonb) RETURNS orders
+
+advance_order_stage(p_order_id uuid) RETURNS orders
 ```
 
-### Memeriksa jalur realtime tanpa backend
-
-```sql
-LISTEN pos_order_events;
--- jalankan place_order() di sesi psql lain, lalu tekan Enter di sesi ini.
-```
+`place_order()` menerima harga **terhitung dari klien** (mobile app), bukan
+menghitung dari katalog. Tiap elemen `p_items`:
+`{product_id, name_snapshot, size, milk, ice, sugar, extra_shot, note,
+unit_price, qty, line_total}`.
 
 ---
 
-## 6. Dummy Mobile Simulator
+## 8. Dummy POS Test Interface
 
-Berperan sebagai aplikasi mobile yang belum jadi (PRD 7.5).
-
-```bash
-python simulator/mobile_simulator.py                        # 1 order acak
-python simulator/mobile_simulator.py --count 5 --interval 2
-python simulator/mobile_simulator.py --store sudirman --mode dine_in
-python simulator/mobile_simulator.py --watch                # pantau sampai stage 3
-python simulator/mobile_simulator.py --list-stores
-python simulator/mobile_simulator.py --seed 7               # hasil reproducible
-```
-
-`--watch` mem-polling `GET /api/orders/{id}` dan mencetak setiap perubahan
-stage — inilah verifikasi bahwa update dari POS benar-benar tersimpan di
-database, bukan sekadar berubah di layar POS.
-
-Simulator memakai id produk dari `db/seed.sql`. Backend sengaja tidak
-menyediakan endpoint katalog karena manajemen katalog di luar scope (PRD 4).
-
----
-
-## 7. Dummy POS Test Interface
-
-`http://localhost:8000/pos/` — halaman statis satu file, disajikan langsung
-oleh backend (tidak perlu web server terpisah).
-
-Fitur: pemilih store · antrian realtime · detail item lengkap dengan
-size/milk/ice/sugar/note · `pickup_code` besar untuk mode pickup · nomor meja
-untuk dine-in · tombol advance stage · filter per stage · log event · indikator
-koneksi dengan auto-reconnect (exponential backoff).
-
-Untuk menguji **store isolation**: buka dua tab, pilih store berbeda, lalu
-kirim order ke salah satunya. Hanya tab yang cocok yang bereaksi.
-
----
-
-## 8. Asumsi Eksplisit
-
-> Bagian ini memenuhi PRD Bagian 7.2, 15, dan Acceptance Criteria terakhir.
-> **Semua di bawah ini adalah tebakan wajar yang perlu dikonfirmasi tim mobile.**
-> Semuanya terisolasi di `db/schema.sql` + `db/functions.sql` — mengoreksinya
-> tidak menyentuh kode Python.
-
-### 8.1 Nilai `stage` (0–3)
-
-| stage | Arti yang diasumsikan |
-|---|---|
-| `0` | Order diterima / masuk antrian |
-| `1` | Sedang diproses / diracik barista |
-| `2` | Siap diambil (pickup) / siap dikirim (delivery) / diantar ke meja |
-| `3` | Selesai / diterima customer |
-
-Bagaimana stage 2 dan 3 dibedakan antar `fulfilment_mode` **belum
-didefinisikan** — implementasi saat ini memperlakukan ketiganya sama.
-
-### 8.2 Nilai `status`
-
-Enum: `pending`, `paid`, `active`, `completed`, `cancelled`. Merepresentasikan
-siklus hidup order, independen dari progres dapur. Pemetaan yang dipakai
-`advance_order_stage()`:
-
-| stage baru | status |
-|---|---|
-| 1, 2 | `active` |
-| 3 | `completed` |
-
-`place_order()` menghasilkan `status = 'paid'`, `payment_status = 'paid'`,
-`stage = 0`. **Asumsi:** pembayaran dianggap sudah berhasil saat order dibuat
-(model prepaid seperti Kopi Kenangan); belum ada integrasi payment gateway.
-
-`cancelled` tidak pernah di-set oleh backend ini — belum ada RPC pembatalan
-dalam kontrak tim mobile.
-
-### 8.3 Nilai `fulfilment_mode`
-
-Enum: `pickup`, `dine_in`, `delivery`. Aturan yang diasumsikan:
-
-- `pickup` → `pickup_code` di-generate (format `A000`: huruf + 3 digit, nomor
-  antrian **per toko per hari**). Mode lain `pickup_code = NULL`.
-- `dine_in` → `table_number` wajib.
-- `delivery` → `address_id` wajib, `delivery_fee` **flat Rp 10.000**
-  (angka karangan — belum ada aturan ongkir resmi).
-
-### 8.4 Format `items` (jsonb) pada `place_order()`
-
-Array objek; per elemen: `product_id` (uuid, wajib), `qty` (int, default 1),
-`size`, `milk`, `ice`, `sugar` (text, opsional), `extra_shot` (bool, default
-false), `note` (text, opsional).
-
-Harga dihitung `products.base_price + Σ option_values.price_delta`, dicocokkan
-lewat `option_groups.key` → `option_values.key`. Boolean `extra_shot: true`
-dipetakan ke `option_values.key = 'yes'` dalam group `extra_shot`.
-**Opsi yang tidak dikenal diperlakukan sebagai delta 0, bukan error**, supaya
-simulator POC tidak mudah gagal — tim mobile mungkin ingin ini lebih ketat.
-
-### 8.5 Loyalitas (efek samping `place_order()`)
-
-1 stamp per cup minuman (`products.kind = 'drink'`), 1 poin per Rp 1.000 dari
-total akhir, dicatat ke `loyalty_ledger`. Aturan tier tidak diimplementasikan.
-
-### 8.6 Voucher
-
-Voucher tidak valid/kedaluwarsa → `place_order()` **gagal** (bukan diabaikan
-diam-diam), supaya customer tidak salah paham soal harga. Diskon dibatasi
-maksimal sebesar subtotal. Klaim voucher (`user_vouchers`) tidak dipakai —
-di luar scope.
-
-### 8.7 Penomoran order
-
-`order_no` = `ORD-YYYYMMDD-NNNN` dengan counter **global harian** (tabel
-`order_no_counters`), karena `orders.order_no` UNIQUE lintas toko. Nomor
-antrian `pickup_code` memakai counter terpisah **per toko per hari**
-(`store_queue_counters`). Kedua tabel counter ini tambahan kami, bukan bagian
-skema tim mobile.
-
-### 8.8 Objek tambahan di luar skema Bagian 8
-
-Diizinkan PRD Bagian 15 ("boleh menambah index/trigger pendukung realtime"):
-
-- trigger `trg_orders_notify_insert` / `trg_orders_notify_update` +
-  fungsi `notify_order_event()` — sumber event realtime;
-- trigger `trg_orders_touch` / `trg_profiles_touch` — mengisi `updated_at`;
-- index `idx_orders_store_created`, `idx_orders_store_stage`, `idx_orders_store_status`;
-- tabel counter pada 8.7.
-
-**Hanya trigger notify yang tetap dibutuhkan di Supabase asli**, dan hanya bila
-`REALTIME_MODE=notify`. Dengan `REALTIME_MODE=poll`, backend berjalan tanpa
-menambah objek apa pun ke database tim mobile.
-
-### 8.9 Skema `auth` lokal
-
-`db/schema.sql` membuat `auth.users` minimal agar FK tidak error. Di Supabase
-asli tabel ini sudah dikelola GoTrue — **jangan apply `schema.sql` ke sana.**
+`http://localhost:8000/pos/` — halaman statis satu file yang disajikan backend.
+Fitur: pemilih store · antrian realtime · detail item · `pickup_code` · tombol
+advance stage · filter per stage · log event · auto-reconnect. Untuk menguji
+store isolation: buka dua tab, pilih store berbeda; hanya store yang cocok
+bereaksi.
 
 ---
 
@@ -391,76 +260,60 @@ pytest -m db        # hanya yang butuh database
 pytest -m "not db"  # hanya unit test murni
 ```
 
-Test yang butuh database **otomatis di-skip** (bukan gagal) bila PostgreSQL
-tidak terjangkau, jadi `pytest` tetap hijau sebelum `docker compose up`.
+Test `db` butuh Postgres berisi mirror skema asli (dan `ENABLE_DEV_ENDPOINTS=true`
+untuk menyuntik order lewat `/api/dev/*`). Otomatis **di-skip** (bukan gagal)
+bila database tidak terjangkau.
 
 | File | Cakupan |
 |---|---|
-| `tests/test_rpc.py` | `place_order()` & `advance_order_stage()`: harga dari base_price + option delta, snapshot opsi, pickup_code, delivery fee, voucher, urutan stage 0→1→2→3, pemetaan status, penolakan produk nonaktif / toko tutup / stage final, persistensi |
+| `tests/test_rpc.py` | `place_order()` (harga dari klien, snapshot item, order_no `#KR-…`, stamp/poin) & `advance_order_stage()` (0→1→2→3, status `preparing`/`ready`/`on_the_way`/`completed`, idempotent di stage final, scope pemilik) |
 | `tests/test_orders_api.py` | Store isolation, filter `status`/`stage`/`fulfilment_mode`, join `order_items`, urutan & limit, health, stores |
 | `tests/test_ws_manager.py` | Store isolation di lapisan WebSocket, pembuangan koneksi mati |
-| `tests/test_schemas.py` | Validasi payload PRD 9.3, bentuk event PRD 9.5/9.6 |
+| `tests/test_schemas.py` | Validasi `PlaceOrderRequest` & bentuk event WS sesuai skema asli |
 
-### Hasil verifikasi
+### Bukti realtime (Task 3)
 
-Diverifikasi terhadap PostgreSQL sungguhan (bukan mock): **54 test lulus**.
-Alur end-to-end diuji pada kedua mode realtime — order dari simulator sampai ke
-POS, advance stage ter-broadcast balik, POS store lain tidak menerima apa pun:
+Diverifikasi end-to-end terhadap Postgres berisi **mirror skema asli** + trigger
+`db/realtime.sql`, lewat modul backend sungguhan (listener → ws_manager → RPC
+wrapper), bukan mock:
 
-| Mode | `order.created` | `order.stage_updated` |
-|---|---|---|
-| `notify` | 93 ms | 32 ms |
-| `poll` (interval 0.5 s) | 328 ms | 484 ms |
+- `order.created` sampai ke POS store yang tepat, **lengkap dengan `order_items`**;
+- `order.stage_updated` sampai untuk tiap transisi (`preparing` → `ready` →
+  `completed`);
+- POS store lain (Sudirman) menerima **0 event** — store isolation terjaga;
+- Perubahan tersimpan permanen di DB; loyalty (`+1 stamp`, poin) ikut tercatat.
 
-Keduanya jauh di bawah target < 2 detik (PRD Bagian 11).
-
-> Catatan: verifikasi dilakukan pada PostgreSQL 12; target proyek adalah
-> PostgreSQL 15+/Supabase. Tidak ada fitur versi-spesifik yang dipakai —
-> `gen_random_uuid()` diambil dari extension `pgcrypto` agar kompatibel ke bawah.
+Semua `pytest` (50 test) lulus, 31 di antaranya dijalankan langsung terhadap DB
+mirror skema asli.
 
 ---
 
-## 10. Checklist Acceptance Criteria (PRD Bagian 14)
+## 10. Migrasi & catatan untuk tim mobile
 
-- [x] Order dari simulator langsung muncul di dummy POS store yang sesuai, tanpa refresh manual
-- [x] POS satu store tidak menerima notifikasi order store lain
-- [x] Tombol advance stage memanggil `advance_order_stage()` dan hasilnya ter-broadcast ke semua POS store tersebut
-- [x] `order_items` yang tampil sesuai snapshot tersimpan (size, milk, ice, sugar, note, qty, line_total)
-- [x] Data konsisten setelah backend restart (tidak ada state di memori)
-- [x] Cara pemanggilan RPC terdokumentasi, termasuk contoh SQL langsung (Bagian 5)
-- [x] Asumsi skema dinyatakan eksplisit (Bagian 8)
+Yang perlu dikonfirmasi:
 
----
-
-## 11. Migrasi ke Supabase Asli
-
-1. Ganti `DATABASE_URL` di `.env` dengan connection string Supabase
-   (Dashboard → Project Settings → Database → URI, mode *Session*).
-   **Tidak ada perubahan kode.**
-2. **Jangan** apply `db/schema.sql` atau `db/seed.sql` ke sana.
-3. Pilih salah satu jalur realtime:
-   - minta tim mobile memasang trigger `notify_order_event()` dari bagian
-     *REALTIME SUPPORT* di `db/schema.sql`, lalu pakai `REALTIME_MODE=notify`; atau
-   - set `REALTIME_MODE=poll` — tidak perlu menambah objek apa pun.
-4. Set `ENABLE_DEV_ENDPOINTS=false` — mobile app memanggil `place_order()`
-   langsung ke Supabase, tidak lewat backend ini.
-5. Batasi `CORS_ORIGINS` ke origin POS yang sebenarnya.
-6. Bandingkan `db/functions.sql` dengan RPC resmi tim mobile. Selama
-   **signature dan tipe return sama**, kode Python tidak perlu berubah.
-
-### Yang perlu dikonfirmasi ke tim mobile
-
-1. Definisi resmi enum `status` dan makna `stage` per `fulfilment_mode` (8.1–8.3).
-2. Signature persis `place_order()` — urutan & nama parameter (`app/rpc/place_order.py` mengikat urutan ini).
-3. Format `items` jsonb, terutama penanganan opsi tak dikenal (8.4).
-4. Aturan ongkir, voucher, dan loyalty yang sebenarnya (8.5–8.6).
-5. Boleh/tidaknya memasang trigger NOTIFY di database mereka (8.8).
+1. **Progres order digerakkan siapa?** `advance_order_stage()` asli di-scope ke
+   **pemilik order** (dirancang untuk timer auto-advance sisi pelanggan). Backend
+   POS memanggilnya dengan impersonasi pemilik. Perlu disepakati apakah barista
+   (POS) memang boleh memajukan stage, atau progres murni dari aplikasi pelanggan.
+2. **Pembayaran.** `place_order()` selalu men-set `payment_status='paid'` &
+   `payment_provider` dari payload (`simulated`). Integrasi gateway sungguhan
+   menyusul.
+3. **Pembatalan order.** Belum ada RPC pembatalan; status `orders` asli pun tak
+   punya nilai `cancelled`.
 
 ---
 
-## 12. Di Luar Scope Fase Ini
+## 11. Di luar scope fase ini
 
-Aplikasi mobile · UI POS production · autentikasi end-user · autentikasi antara
-backend dan database · `redeem_reward()` penuh (stub saja) · klaim voucher ·
-CRUD katalog produk · pembatalan order · push notification · deployment skala
-besar.
+Aplikasi mobile · UI POS production · autentikasi end-user · gateway pembayaran
+sungguhan · `redeem_reward()` penuh · klaim voucher · CRUD katalog · pembatalan
+order · push notification · deployment skala besar.
+
+---
+
+## 12. Arsip
+
+`legacy/simulator/` — dummy mobile simulator fase PoC, **tidak dipakai lagi**
+(aplikasi mobile asli memanggil `place_order()` langsung ke Supabase). Lihat
+[`legacy/README.md`](legacy/README.md).

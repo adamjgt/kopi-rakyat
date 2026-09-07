@@ -35,7 +35,9 @@ class Settings(BaseSettings):
     poll_interval_seconds: float = 1.0
 
     # --- Aplikasi ---
-    enable_dev_endpoints: bool = True
+    # Default FALSE: mobile app memanggil place_order() langsung ke Supabase,
+    # jadi /api/dev/* tidak didaftarkan. Set true hanya untuk uji lokal.
+    enable_dev_endpoints: bool = False
     cors_origins: str = "*"
     log_level: str = "INFO"
 
